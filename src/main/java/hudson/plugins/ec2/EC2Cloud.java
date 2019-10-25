@@ -355,7 +355,8 @@ public abstract class EC2Cloud extends Cloud {
      * @param template If left null, then all instances are counted.
      */
     private int countCurrentEC2Slaves(SlaveTemplate template) throws AmazonClientException {
-        LOGGER.log(Level.FINE, "Counting current slaves: " + (template != null ? (" AMI: " + template.getAmi()) : " All AMIS"));
+        // TODO: this should NOT include stopped instances!!!!
+        LOGGER.log(Level.INFO, "Counting current slaves: " + (template != null ? (" AMI: " + template.getAmi()) : " All AMIS"));
         int n = 0;
         Set<String> instanceIds = new HashSet<String>();
         String description = template != null ? template.description : null;
@@ -366,7 +367,7 @@ public abstract class EC2Cloud extends Cloud {
                         || template.getAmi().equals(i.getImageId()))) {
                     InstanceStateName stateName = InstanceStateName.fromValue(i.getState().getName());
                     if (stateName != InstanceStateName.Terminated && stateName != InstanceStateName.ShuttingDown) {
-                        LOGGER.log(Level.FINE, "Existing instance found: " + i.getInstanceId() + " AMI: " + i.getImageId()
+                        LOGGER.log(Level.INFO, "Existing instance found: " + i.getInstanceId() + " AMI: " + i.getImageId()
                                 + " Template: " + description);
                         n++;
                         instanceIds.add(i.getInstanceId());
@@ -468,10 +469,12 @@ public abstract class EC2Cloud extends Cloud {
             }
         }
 
+        LOGGER.log(Level.INFO, "Number of instances found: " + n);
         return n;
     }
 
     private boolean isEc2ProvisionedAmiSlave(List<Tag> tags, String description) {
+        LOGGER.log(Level.INFO, "isEc2ProvisionedAmiSlave: " + tags + "\t desc: " + description);
         for (Tag tag : tags) {
             if (StringUtils.equals(tag.getKey(), EC2Tag.TAG_NAME_JENKINS_SLAVE_TYPE)) {
                 if (description == null) {
@@ -492,15 +495,16 @@ public abstract class EC2Cloud extends Cloud {
     }
 
     /**
-     * Returns the maximum number of possible slaves that can be created.
+     * Returns the maximum number of possible slaves that can be created (does NOT include stopped instances!)
      */
     private int getPossibleNewSlavesCount(SlaveTemplate template) throws AmazonClientException {
         int estimatedTotalSlaves = countCurrentEC2Slaves(null);
         int estimatedAmiSlaves = countCurrentEC2Slaves(template);
 
+        LOGGER.log(Level.INFO, "getPossibleNewSlavesCount from ETS " + estimatedTotalSlaves + " EAS " + estimatedAmiSlaves + " instanceCap " + instanceCap + " templateInstanceCap " + template.getInstanceCap());
         int availableTotalSlaves = instanceCap - estimatedTotalSlaves;
         int availableAmiSlaves = template.getInstanceCap() - estimatedAmiSlaves;
-        LOGGER.log(Level.FINE, "Available Total Slaves: " + availableTotalSlaves + " Available AMI slaves: " + availableAmiSlaves
+        LOGGER.log(Level.INFO, "Available Total Slaves: " + availableTotalSlaves + " Available AMI slaves: " + availableAmiSlaves
                 + " AMI: " + template.getAmi() + " TemplateDesc: " + template.description);
 
         return Math.min(availableAmiSlaves, availableTotalSlaves);
@@ -516,17 +520,18 @@ public abstract class EC2Cloud extends Cloud {
          * allocated, we don't look at that instance as available for provisioning.
          */
         int possibleSlavesCount = getPossibleNewSlavesCount(template);
-        if (possibleSlavesCount < 0) {
-            LOGGER.log(Level.INFO, "Cannot provision - no capacity for instances: " + possibleSlavesCount);
-            return null;
-        }
-
+        LOGGER.info("possibleSlavesCount is " + possibleSlavesCount);
         try {
             EnumSet<SlaveTemplate.ProvisionOptions> provisionOptions = EnumSet.noneOf(SlaveTemplate.ProvisionOptions.class);
             if (forceCreateNew)
                 provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.FORCE_CREATE);
             else if (possibleSlavesCount > 0)
                 provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.ALLOW_CREATE);
+            else {
+                // can only start suspended instances 
+                LOGGER.log(Level.INFO, "Cannot create - no capacity for new instances: " + possibleSlavesCount);
+                provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.DO_NOT_CREATE);
+            }
             return template.provision(StreamTaskListener.fromStdout(), requiredLabel, provisionOptions);
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Exception during provisioning", e);

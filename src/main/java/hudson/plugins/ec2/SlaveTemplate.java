@@ -361,13 +361,17 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         return iamInstanceProfile;
     }
 
-    enum ProvisionOptions { ALLOW_CREATE, FORCE_CREATE }
+    enum ProvisionOptions { ALLOW_CREATE, FORCE_CREATE, DO_NOT_CREATE /* only resume stopped instances */ }
 
     /**
      * Provisions a new EC2 slave or starts a previously stopped on-demand instance.
      *
      * @return always non-null. This needs to be then added to {@link Hudson#addNode(Node)}.
      */
+    public EC2AbstractSlave newprovision(TaskListener listener, Label requiredLabel, EnumSet<ProvisionOptions> provisionOptions) throws AmazonClientException, IOException {
+        throw new IOException("Not supposed to provision yet!");
+    }
+
     public EC2AbstractSlave provision(TaskListener listener, Label requiredLabel, EnumSet<ProvisionOptions> provisionOptions) throws AmazonClientException, IOException {
         if (this.spotConfig != null) {
             if (provisionOptions.contains(ProvisionOptions.ALLOW_CREATE) || provisionOptions.contains(ProvisionOptions.FORCE_CREATE))
@@ -441,6 +445,9 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
      * Provisions an On-demand EC2 slave by launching a new instance or starting a previously-stopped instance.
      */
     private EC2AbstractSlave provisionOndemand(TaskListener listener, Label requiredLabel, EnumSet<ProvisionOptions> provisionOptions) throws AmazonClientException, IOException {
+        LOGGER.info("provisionOnDemand with options " + provisionOptions);
+
+        // MAM TODO: break this up - it's too long
         PrintStream logger = listener.getLogger();
         AmazonEC2 ec2 = getParent().connect();
 
@@ -561,7 +568,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                     for (Instance instance : reservation.getInstances()) {
                         if (checkInstance(logger, instance, requiredLabel, ec2Node)) {
                             existingInstance = instance;
-                            logProvision(logger, "Found existing instance: " + existingInstance + ((ec2Node[0] != null) ? (" node: " + ec2Node[0].getInstanceId()) : ""));
+                            logProvision(logger, "Found existing instance (1): " + existingInstance + ((ec2Node[0] != null) ? (" node: " + ec2Node[0].getInstanceId()) : ""));
                             break reservationLoop;
                         }
                     }
@@ -569,6 +576,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             }
 
             if (existingInstance == null) {
+                logProvisionInfo(logger, "No existing instances found");
                 if (!provisionOptions.contains(ProvisionOptions.FORCE_CREATE) &&
                     !provisionOptions.contains(ProvisionOptions.ALLOW_CREATE)) {
                     logProvision(logger, "No existing instance found - but cannot create new instance");
@@ -595,6 +603,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             if (existingInstance.getState().getName().equalsIgnoreCase(InstanceStateName.Stopping.toString())
                     || existingInstance.getState().getName().equalsIgnoreCase(InstanceStateName.Stopped.toString())) {
 
+                logProvision(logger, "Found a stopped/stopping instance");
                 List<String> instances = new ArrayList<String>();
                 instances.add(existingInstance.getInstanceId());
                 StartInstancesRequest siRequest = new StartInstancesRequest(instances);
@@ -609,11 +618,18 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             if (ec2Node[0] != null) {
                 logProvisionInfo(logger, "Using existing slave: " + ec2Node[0].getInstanceId());
                 return ec2Node[0];
+            } else {
+                logProvisionInfo(logger, "No existing slaves found");
             }
 
             // Existing slave not found
-            logProvision(logger, "Creating new slave for existing instance: " + existingInstance);
-            return newOndemandSlave(existingInstance);
+            if (!provisionOptions.contains(ProvisionOptions.DO_NOT_CREATE)) {
+                logProvision(logger, "Creating new slave for existing instance: " + existingInstance);
+                return newOndemandSlave(existingInstance);
+            } else {
+                logProvisionInfo(logger, "Using existing slave: " + ec2Node[0].getInstanceId());
+                return null; // MAM is this right?
+            }
 
         } catch (FormException e) {
             throw new AssertionError(e); // we should have discovered all
@@ -899,20 +915,24 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
      * Get a list of security group ids for the slave
      */
     private List<String> getEc2SecurityGroups(AmazonEC2 ec2) throws AmazonClientException {
+        LOGGER.log(Level.INFO, "getting EC2 Security groups for " + securityGroupSet);
         List<String> groupIds = new ArrayList<String>();
 
         DescribeSecurityGroupsResult groupResult = getSecurityGroupsBy("group-name", securityGroupSet, ec2);
+        LOGGER.log(Level.INFO, "Got security groups " + groupResult.getSecurityGroups());
+
         if (groupResult.getSecurityGroups().size() == 0) {
             groupResult = getSecurityGroupsBy("group-id", securityGroupSet, ec2);
         }
 
         for (SecurityGroup group : groupResult.getSecurityGroups()) {
+            LOGGER.info("Checking subnet for " + group + " with vpc " + group.getVpcId());
             if (group.getVpcId() != null && !group.getVpcId().isEmpty()) {
                 List<Filter> filters = new ArrayList<Filter>();
                 filters.add(new Filter("vpc-id").withValues(group.getVpcId()));
                 filters.add(new Filter("state").withValues("available"));
                 filters.add(new Filter("subnet-id").withValues(getSubnetId()));
-
+                LOGGER.info("Fetching subnets with filters " + filters);
                 DescribeSubnetsRequest subnetReq = new DescribeSubnetsRequest();
                 subnetReq.withFilters(filters);
                 DescribeSubnetsResult subnetResult = ec2.describeSubnets(subnetReq);
@@ -921,10 +941,14 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                 if (subnets != null && !subnets.isEmpty()) {
                     groupIds.add(group.getGroupId());
                 }
+            } else {
+
             }
         }
 
         if (securityGroupSet.size() != groupIds.size()) {
+            LOGGER.warning("securityGroupSet was " + securityGroupSet + " but groupIds were " + groupIds);
+            // MAM TODO: this is an inaccurate error message?
             throw new AmazonClientException("Security groups must all be VPC security groups to work in a VPC context");
         }
 

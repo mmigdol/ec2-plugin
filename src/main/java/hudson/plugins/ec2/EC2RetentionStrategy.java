@@ -146,7 +146,8 @@ public class EC2RetentionStrategy extends RetentionStrategy<EC2Computer> {
     @Override
     public void start(EC2Computer c) {
         LOGGER.info("Start requested for " + c.getName());
-        c.connect(false);
+        LOGGER.info("NOT doing this for EC2 computers by default");
+        // MAM c.connect(false);
     }
 
     // no registration since this retention strategy is used only for EC2 nodes

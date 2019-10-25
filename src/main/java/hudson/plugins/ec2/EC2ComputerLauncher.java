@@ -52,6 +52,10 @@ public abstract class EC2ComputerLauncher extends ComputerLauncher {
     @Override
     public void launch(SlaveComputer slaveComputer, TaskListener listener) {
         try {
+            // added to figure out why instances started when jenkins starts
+            Exception traceEx = new Exception("Launch was called");
+            traceEx.printStackTrace(listener.error(traceEx.getMessage()));
+
             EC2Computer computer = (EC2Computer) slaveComputer;
 
             while (true) {
